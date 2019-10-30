@@ -1,0 +1,16 @@
+#include <windows.h>
+#include "resource.h"
+
+LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
+IDI_ICON1 ICON "kamaboko.ico"
+IDI_ICON2 ICON "kamaboko2.ico"
+
+1 24 "BonDriverTunnel.manifest"
+
+IDR_MENU1 MENU
+BEGIN
+    POPUP "1"
+    BEGIN
+        MENUITEM "Close BonDriverTunnel", IDC_BUTTON_CLOSE
+    END
+END
