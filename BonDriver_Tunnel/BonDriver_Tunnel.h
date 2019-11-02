@@ -1,16 +1,36 @@
 ﻿#pragma once
 
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#else
+#include <mutex>
+typedef unsigned short WCHAR;
+typedef const WCHAR * LPCWSTR;
+typedef LPCWSTR LPCTSTR;
+typedef unsigned char BYTE;
+typedef unsigned int DWORD;
+typedef int BOOL;
+#define FALSE 0
+#define TRUE 1
+#define WAIT_ABANDONED 0x80
+#endif
+
 #define BONSDK_IMPLEMENT
 #include "IBonDriver3.h"
 
 class CProxyClient3 : public IBonDriver3
 {
 public:
-    CProxyClient3(LPCSTR addr, LPCSTR port, LPCWSTR origin, int connectTimeout, int sendRecvTimeout);
+    CProxyClient3(const char *addr, const char *port,
+#ifdef _WIN32
+                  LPCWSTR origin,
+#else
+                  const char *origin,
+#endif
+                  int connectTimeout, int sendRecvTimeout);
     DWORD CreateBon();
     // IBonDriver3
     const DWORD GetTotalDeviceNum();
@@ -41,13 +61,25 @@ private:
     bool WriteAndReadString(WCHAR (&buf)[256], const char (&cmd)[5], const void *param1 = nullptr, const void *param2 = nullptr);
     bool Write(const char (&cmd)[5], const void *param1 = nullptr, const void *param2 = nullptr);
     bool ReadAll(void *buf, DWORD len);
+#ifdef _WIN32
     CRITICAL_SECTION m_cs;
+#else
+    std::recursive_mutex m_cs;
+#endif
     char m_addr[64];
     char m_port[8];
+#ifdef _WIN32
     WCHAR m_origin[256];
+#else
+    char m_origin[256];
+#endif
     int m_connectTimeout;
     int m_sendRecvTimeout;
+#ifdef _WIN32
     SOCKET m_sock;
+#else
+    int m_sock;
+#endif
     DWORD m_sessionID;
     DWORD m_sequenceNum;
     DWORD m_tsBufSize;
@@ -107,10 +139,19 @@ private:
 class CBlockLock
 {
 public:
+#ifdef _WIN32
     CBlockLock(CRITICAL_SECTION *cs) : m_cs(cs) { EnterCriticalSection(m_cs); }
     ~CBlockLock() { LeaveCriticalSection(m_cs); }
+#else
+    CBlockLock(std::recursive_mutex *cs) : m_cs(cs) { m_cs->lock(); }
+    ~CBlockLock() { m_cs->unlock(); }
+#endif
 private:
     CBlockLock(const CBlockLock&);
     CBlockLock &operator=(const CBlockLock&);
+#ifdef _WIN32
     CRITICAL_SECTION *m_cs;
+#else
+    std::recursive_mutex *m_cs;
+#endif
 };

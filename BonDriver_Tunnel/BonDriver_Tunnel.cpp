@@ -1,14 +1,117 @@
 ﻿#include "BonDriver_Tunnel.h"
 #include <string.h>
+#ifdef _WIN32
 #include <wchar.h>
+#else
+#include <dlfcn.h>
+#include <errno.h>
+#include <netdb.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#define INVALID_SOCKET -1
+#define closesocket(sock) close(sock)
+#endif
 
 namespace
 {
 IBonDriver *g_this;
+#ifdef _WIN32
 HINSTANCE g_hModule;
+#endif
+
+inline void SwapBytes4(void *y, const void *x)
+{
+#ifndef _WIN32
+    int le = 1;
+    if (!reinterpret_cast<BYTE*>(&le)[0]) {
+        // Big-endian
+        const BYTE *bx = static_cast<const BYTE*>(x);
+        BYTE *by = static_cast<BYTE*>(y);
+        by[3] = bx[0];
+        by[2] = bx[1];
+        by[1] = bx[2];
+        by[0] = bx[3];
+        return;
+    }
+#endif
+    memcpy(y, x, 4);
 }
 
-CProxyClient3::CProxyClient3(LPCSTR addr, LPCSTR port, LPCWSTR origin, int connectTimeout, int sendRecvTimeout)
+inline void SwapBytes4(void *x)
+{
+#ifdef _WIN32
+    static_cast<void>(x);
+#else
+    BYTE y[4];
+    SwapBytes4(y, x);
+    memcpy(x, y, 4);
+#endif
+}
+
+#ifndef _WIN32
+void GetIniString(const char *key, const char *def, char *ret, DWORD retSize, const char *fileName)
+{
+    FILE *fp = fopen(fileName, "re");
+    if (fp) {
+        char buf[1024];
+        DWORD bufLen = 0;
+        int c;
+        do {
+            c = fgetc(fp);
+            if (c >= 0 && static_cast<char>(c) && static_cast<char>(c) != '\n') {
+                buf[bufLen++] = static_cast<char>(c);
+                if (bufLen >= sizeof(buf)) {
+                    break;
+                }
+                continue;
+            }
+            buf[bufLen] = '\0';
+            bufLen = 0;
+            char *var = buf + strspn(buf, "\t\r ");
+            while (*var && strchr("\t\r ", var[strlen(var) - 1])) {
+                var[strlen(var) - 1] = '\0';
+            }
+            char *val = strchr(var, '=');
+            if (val) {
+                *val = '\0';
+                while (*var && strchr("\t\r ", var[strlen(var) - 1])) {
+                    var[strlen(var) - 1] = '\0';
+                }
+                if (!strcmp(key, var)) {
+                    val += 1 + strspn(val + 1, "\t\r ");
+                    if ((*val == '"' || *val == '\'') && val[1] && *val == val[strlen(val) - 1]) {
+                        val[strlen(val) - 1] = '\0';
+                        ++val;
+                    }
+                    if (strlen(val) < retSize) {
+                        strcpy(ret, val);
+                    }
+                    fclose(fp);
+                    return;
+                }
+            }
+        }
+        while (c >= 0 && static_cast<char>(c));
+        fclose(fp);
+    }
+    *ret = '\0';
+    if (strlen(def) < retSize) {
+        strcpy(ret, def);
+    }
+}
+#endif
+}
+
+CProxyClient3::CProxyClient3(const char *addr, const char *port,
+#ifdef _WIN32
+                             LPCWSTR origin,
+#else
+                             const char *origin,
+#endif
+                             int connectTimeout, int sendRecvTimeout)
     : m_connectTimeout(connectTimeout)
     , m_sendRecvTimeout(sendRecvTimeout)
     , m_sock(INVALID_SOCKET)
@@ -16,10 +119,19 @@ CProxyClient3::CProxyClient3(LPCSTR addr, LPCSTR port, LPCWSTR origin, int conne
     , m_sequenceNum(0)
     , m_tsBufSize(0)
 {
+#ifdef _WIN32
     InitializeCriticalSection(&m_cs);
     strncpy_s(m_addr, addr, _TRUNCATE);
     strncpy_s(m_port, port, _TRUNCATE);
     wcsncpy_s(m_origin, origin, _TRUNCATE);
+#else
+    m_addr[0] = m_port[0] = m_origin[0] = '\0';
+    if (strlen(addr) < sizeof(m_addr) && strlen(port) < sizeof(m_port) && strlen(origin) < sizeof(m_origin)) {
+        strcpy(m_addr, addr);
+        strcpy(m_port, port);
+        strcpy(m_origin, origin);
+    }
+#endif
 }
 
 DWORD CProxyClient3::CreateBon()
@@ -168,6 +280,7 @@ const BOOL CProxyClient3::GetTsStream(BYTE **ppDst, DWORD *pdwSize, DWORD *pdwRe
             for (int retry = 0;; ++retry) {
                 DWORD n;
                 if (Write("GTsS") && ReadAll(&n, 4)) {
+                    SwapBytes4(&n);
                     if (n < 4 || n - 4 > sizeof(m_tsBuf)) {
                         // 戻り値が異常
                         closesocket(m_sock);
@@ -175,6 +288,7 @@ const BOOL CProxyClient3::GetTsStream(BYTE **ppDst, DWORD *pdwSize, DWORD *pdwRe
                         break;
                     }
                     if (ReadAll(&m_tsRemain, 4) && ReadAll(m_tsBuf, n - 4)) {
+                        SwapBytes4(&m_tsRemain);
                         m_tsBufSize = n - 4;
                         break;
                     }
@@ -210,8 +324,10 @@ void CProxyClient3::Release()
     if (Write("Rele") && ReadAll(&n, 4)) {
         closesocket(m_sock);
     }
+#ifdef _WIN32
     WSACleanup();
     DeleteCriticalSection(&m_cs);
+#endif
     g_this = nullptr;
     delete this;
 }
@@ -225,20 +341,37 @@ DWORD CProxyClient3::Connect(const char (&cmd)[9])
         hints.ai_protocol = IPPROTO_TCP;
         addrinfo *result;
         if (getaddrinfo(m_addr, m_port, &hints, &result) == 0) {
-            m_sock = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+            m_sock = socket(result->ai_family, result->ai_socktype
+#ifndef _WIN32
+                                | SOCK_CLOEXEC | SOCK_NONBLOCK
+#endif
+                            , result->ai_protocol);
             if (m_sock != INVALID_SOCKET) {
+#ifdef _WIN32
                 unsigned long x = 1;
                 ioctlsocket(m_sock, FIONBIO, &x);
+#endif
                 bool connected = connect(m_sock, result->ai_addr, static_cast<int>(result->ai_addrlen)) == 0;
-                if (!connected && WSAGetLastError() == WSAEWOULDBLOCK) {
+                if (!connected &&
+#ifdef _WIN32
+                    WSAGetLastError() == WSAEWOULDBLOCK
+#else
+                    errno == EINPROGRESS
+#endif
+                    ) {
                     fd_set wfds;
                     FD_ZERO(&wfds);
                     FD_SET(m_sock, &wfds);
                     timeval tv = {m_connectTimeout, 0};
-                    connected = select(0, nullptr, &wfds, nullptr, (m_connectTimeout > 0 ? &tv : nullptr)) == 1;
+                    connected = select(static_cast<int>(m_sock) + 1, nullptr, &wfds, nullptr, (m_connectTimeout > 0 ? &tv : nullptr)) == 1;
                 }
+#ifdef _WIN32
                 x = 0;
                 ioctlsocket(m_sock, FIONBIO, &x);
+#else
+                int x = 0;
+                ioctl(m_sock, FIONBIO, &x);
+#endif
                 if (!connected) {
                     closesocket(m_sock);
                     m_sock = INVALID_SOCKET;
@@ -248,14 +381,25 @@ DWORD CProxyClient3::Connect(const char (&cmd)[9])
         }
         if (m_sock != INVALID_SOCKET) {
             if (m_sendRecvTimeout > 0) {
+#ifdef _WIN32
                 DWORD to = m_sendRecvTimeout * 1000;
+#else
+                timeval to = {m_sendRecvTimeout, 0};
+#endif
                 setsockopt(m_sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&to), sizeof(to));
                 setsockopt(m_sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&to), sizeof(to));
             }
             char buf[524] = {};
             memcpy(buf, cmd, 8);
-            memcpy(buf + 8, &m_sessionID, 4);
+            SwapBytes4(buf + 8, &m_sessionID);
+#ifdef _WIN32
             memcpy(buf + 12, m_origin, (wcslen(m_origin) + 1) * sizeof(WCHAR));
+#else
+            // TODO: 今のところASCIIのみ対応
+            for (int i = 0; m_origin[i]; ++i) {
+                buf[12 + i * 2] = m_origin[i];
+            }
+#endif
             for (int n = 0, m; n < 524; n += m) {
                 m = send(m_sock, buf + n, 524 - n, 0);
                 if (m <= 0) {
@@ -266,6 +410,7 @@ DWORD CProxyClient3::Connect(const char (&cmd)[9])
             }
             DWORD n;
             if (ReadAll(&n, 4)) {
+                SwapBytes4(&n);
                 return n;
             }
         }
@@ -278,6 +423,7 @@ bool CProxyClient3::WriteAndRead4(void *buf, const char (&cmd)[5], const void *p
     ++m_sequenceNum;
     for (int retry = 0;; ++retry) {
         if (Write(cmd, param1, param2) && ReadAll(buf, 4)) {
+            SwapBytes4(buf);
             return true;
         }
         if (retry >= 1) {
@@ -294,12 +440,22 @@ bool CProxyClient3::WriteAndReadString(WCHAR (&buf)[256], const char (&cmd)[5], 
     for (int retry = 0;; ++retry) {
         DWORD n;
         if (Write(cmd, param1, param2) && ReadAll(&n, 4)) {
+            SwapBytes4(&n);
             n %= 256;
             if (n == 0) {
                 return false;
             }
             if (ReadAll(buf, n * sizeof(WCHAR))) {
                 buf[n] = L'\0';
+#ifndef _WIN32
+                int le = 1;
+                if (!reinterpret_cast<BYTE*>(&le)[0]) {
+                    // Big-endian
+                    for (int i = 0; buf[i]; ++i) {
+                        buf[i] = static_cast<WCHAR>(buf[i] << 8 | buf[i] >> 8);
+                    }
+                }
+#endif
                 return true;
             }
         }
@@ -316,12 +472,12 @@ bool CProxyClient3::Write(const char (&cmd)[5], const void *param1, const void *
     if (m_sock != INVALID_SOCKET) {
         char buf[16] = {};
         memcpy(buf, cmd, 4);
-        memcpy(buf + 4, &m_sequenceNum, 4);
+        SwapBytes4(buf + 4, &m_sequenceNum);
         if (param1) {
-            memcpy(buf + 8, param1, 4);
+            SwapBytes4(buf + 8, param1);
         }
         if (param2) {
-            memcpy(buf + 12, param2, 4);
+            SwapBytes4(buf + 12, param2);
         }
         for (int n = 0, m; n < 16; n += m) {
             m = send(m_sock, buf + n, 16 - n, 0);
@@ -353,6 +509,7 @@ bool CProxyClient3::ReadAll(void *buf, DWORD len)
     return false;
 }
 
+#ifdef _WIN32
 BOOL APIENTRY DllMain(HINSTANCE hModule, DWORD dwReason, LPVOID lpReserved)
 {
     static_cast<void>(lpReserved);
@@ -369,17 +526,19 @@ BOOL APIENTRY DllMain(HINSTANCE hModule, DWORD dwReason, LPVOID lpReserved)
     }
     return TRUE;
 }
+#endif
 
 extern "C" BONAPI IBonDriver * CreateBonDriver(void)
 {
     if (!g_this) {
-        WCHAR pathBuf[MAX_PATH + 4];
-        LPWSTR origin = nullptr;
         char addr[64] = {};
         char port[8] = {};
-        WCHAR optionOrigin[256];
         int connectTimeout = 0;
         int sendRecvTimeout = 0;
+#ifdef _WIN32
+        WCHAR pathBuf[MAX_PATH + 4];
+        LPWSTR origin = nullptr;
+        WCHAR optionOrigin[256];
         {
             // DLLの名前から接続先ドライバ名を抽出
             WCHAR path[MAX_PATH];
@@ -388,31 +547,31 @@ extern "C" BONAPI IBonDriver * CreateBonDriver(void)
                 len = GetLongPathName(path, pathBuf, MAX_PATH);
                 if (len && len < MAX_PATH && wcsrchr(pathBuf, L'\\')) {
                     origin = wcsrchr(pathBuf, L'\\') + 1;
-                    if (_wcsnicmp(origin, L"BonDriver_", 10) == 0) {
+                    LPWSTR ext = wcsrchr(origin, L'.');
+                    if (!ext) {
+                        ext = origin + wcslen(origin);
+                    }
+                    ext[0] = L'\0';
+                    wcscat_s(pathBuf, L".ini");
+                    WCHAR addrW[64];
+                    GetPrivateProfileString(L"OPTION", L"ADDRESS", L"", addrW, 64, pathBuf);
+                    for (int i = 0; addrW[i]; ++i) {
+                        addr[i] = static_cast<char>(addrW[i]);
+                    }
+                    WCHAR portW[8];
+                    GetPrivateProfileString(L"OPTION", L"PORT", L"1193", portW, 8, pathBuf);
+                    for (int i = 0; portW[i]; ++i) {
+                        port[i] = static_cast<char>(portW[i]);
+                    }
+                    GetPrivateProfileString(L"OPTION", L"ORIGIN", L"", optionOrigin, 256, pathBuf);
+                    connectTimeout = GetPrivateProfileInt(L"OPTION", L"CONNECT_TIMEOUT", 5, pathBuf);
+                    sendRecvTimeout = GetPrivateProfileInt(L"OPTION", L"SEND_RECV_TIMEOUT", 5, pathBuf);
+                    ext[0] = L'\0';
+                    if (optionOrigin[0]) {
+                        origin = optionOrigin;
+                    }
+                    else if (_wcsnicmp(origin, L"BonDriver_", 10) == 0) {
                         origin += 10;
-                        LPWSTR ext = wcsrchr(origin, L'.');
-                        if (!ext) {
-                            ext = origin + wcslen(origin);
-                        }
-                        ext[0] = L'\0';
-                        wcscat_s(pathBuf, L".ini");
-                        WCHAR addrW[64];
-                        GetPrivateProfileString(L"OPTION", L"ADDRESS", L"", addrW, 64, pathBuf);
-                        for (int i = 0; addrW[i]; ++i) {
-                            addr[i] = static_cast<char>(addrW[i]);
-                        }
-                        WCHAR portW[8];
-                        GetPrivateProfileString(L"OPTION", L"PORT", L"1193", portW, 8, pathBuf);
-                        for (int i = 0; portW[i]; ++i) {
-                            port[i] = static_cast<char>(portW[i]);
-                        }
-                        GetPrivateProfileString(L"OPTION", L"ORIGIN", L"", optionOrigin, 256, pathBuf);
-                        connectTimeout = GetPrivateProfileInt(L"OPTION", L"CONNECT_TIMEOUT", 5, pathBuf);
-                        sendRecvTimeout = GetPrivateProfileInt(L"OPTION", L"SEND_RECV_TIMEOUT", 5, pathBuf);
-                        ext[0] = L'\0';
-                        if (optionOrigin[0]) {
-                            origin = optionOrigin;
-                        }
                     }
                     else {
                         origin = nullptr;
@@ -420,9 +579,52 @@ extern "C" BONAPI IBonDriver * CreateBonDriver(void)
                 }
             }
         }
+#else
+        char pathBuf[1024];
+        char *origin = nullptr;
+        char optionOrigin[256];
+        {
+            // DLLの名前から接続先ドライバ名を抽出
+            Dl_info info;
+            if (dladdr(reinterpret_cast<void*>(CreateBonDriver), &info) && strlen(info.dli_fname) < sizeof(pathBuf) - 4) {
+                strcpy(pathBuf, info.dli_fname);
+                if (strrchr(pathBuf, '/')) {
+                    origin = strrchr(pathBuf, '/') + 1;
+                    char *ext = strrchr(origin, '.');
+                    if (!ext) {
+                        ext = origin + strlen(origin);
+                    }
+                    strcpy(ext, ".ini");
+                    GetIniString("ADDRESS", "", addr, 64, pathBuf);
+                    GetIniString("PORT", "1193", port, 8, pathBuf);
+                    GetIniString("ORIGIN", "", optionOrigin, 256, pathBuf);
+                    char ret[16];
+                    GetIniString("CONNECT_TIMEOUT", "5", ret, 16, pathBuf);
+                    connectTimeout = static_cast<int>(strtol(ret, nullptr, 10));
+                    GetIniString("SEND_RECV_TIMEOUT", "5", ret, 16, pathBuf);
+                    sendRecvTimeout = static_cast<int>(strtol(ret, nullptr, 10));
+                    ext[0] = '\0';
+                    if (optionOrigin[0]) {
+                        origin = optionOrigin;
+                    }
+                    else if (strncmp(origin, "BonDriver_", 10) == 0) {
+                        origin += 10;
+                    }
+                    else {
+                        origin = nullptr;
+                    }
+                }
+            }
+        }
+#endif
 
+#ifdef _WIN32
         WSAData wsaData;
-        if (origin && WSAStartup(MAKEWORD(2, 2), &wsaData) == 0) {
+        if (origin && WSAStartup(MAKEWORD(2, 2), &wsaData) == 0)
+#else
+        if (origin)
+#endif
+        {
             // 接続
             CProxyClient3 *down = new CProxyClient3(addr, port, origin, connectTimeout, sendRecvTimeout);
             DWORD type = down->CreateBon();

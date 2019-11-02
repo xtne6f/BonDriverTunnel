@@ -41,6 +41,12 @@ SET_EXECUTION_STATE=1 # アプリ接続中はスリープを抑止する(=1)か�
 RING_BUF_NUM=200      # 送信待ちのリングバッファの数(1つあたり48128バイト)
 SESSION_TIMEOUT=180   # 不正な切断時に再接続を待つ時間(秒)
 
+■クライアント側のLinux対応
+端末でBonDriver_Tunnelディレクトリに移動して
+  $ g++ -shared -fPIC -O2 -o BonDriver_Tunnel.so BonDriver_Tunnel.cpp
+あたりでコンパイルできます。recbond( https://github.com/dogeel/recbond )などで利
+用できるはずです。設定ファイルはWindowsと同様です。
+
 ■ライセンス
 MITとします。
 
@@ -49,3 +55,5 @@ https://github.com/xtne6f/BonDriverTunnel
 
 ■謝辞
 拡張ツール中の人のIBonDriver*.hをインクルードしています。
+Linux対応について特にBonDriverProxy_Linux(
+https://github.com/u-n-k-n-o-w-n/BonDriverProxy_Linux )を参考にしました。

@@ -5,10 +5,14 @@
 #pragma once
 
 
+#ifdef _WIN32
 #ifdef BONSDK_IMPLEMENT
 	#define BONAPI	__declspec(dllexport)
 #else
 	#define BONAPI	__declspec(dllimport)
+#endif
+#else
+	#define BONAPI
 #endif
 
 
