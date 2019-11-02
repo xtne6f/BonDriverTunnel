@@ -250,7 +250,7 @@ UINT WINAPI WorkerThread(void *p)
                 else {
                     WCHAR libPath[MAX_PATH + 256 + 64];
                     DWORD len = GetModuleFileName(nullptr, libPath, MAX_PATH);
-                    if (len && len < MAX_PATH && wcsrchr(libPath, L'\\')) {
+                    if (len && len < MAX_PATH && wcsrchr(libPath, L'\\') && !ctx->origin[wcscspn(ctx->origin, L"\\/:*?\"<>|")]) {
                         *wcsrchr(libPath, L'\\') = L'\0';
                         wcscat_s(libPath, L"\\BonDriver_");
                         wcscat_s(libPath, ctx->origin);
