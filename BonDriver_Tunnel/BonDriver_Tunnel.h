@@ -82,8 +82,6 @@ private:
 #endif
     DWORD m_sessionID;
     DWORD m_sequenceNum;
-    DWORD m_tsBufSize;
-    DWORD m_tsRemain;
     BYTE m_tsBuf[481280];
     WCHAR m_tunerName[256];
     WCHAR m_tuningSpace[256];

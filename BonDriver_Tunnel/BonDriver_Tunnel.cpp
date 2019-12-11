@@ -117,7 +117,6 @@ CProxyClient3::CProxyClient3(const char *addr, const char *port,
     , m_sock(INVALID_SOCKET)
     , m_sessionID(0)
     , m_sequenceNum(0)
-    , m_tsBufSize(0)
 {
 #ifdef _WIN32
     InitializeCriticalSection(&m_cs);
@@ -208,14 +207,14 @@ const DWORD CProxyClient3::GetCurSpace()
 {
     CBlockLock lock(&m_cs);
     DWORD n;
-    return WriteAndRead4(&n, "GCSp") ? n : 0;
+    return WriteAndRead4(&n, "GCSp") ? n : 0xFFFFFFFF;
 }
 
 const DWORD CProxyClient3::GetCurChannel()
 {
     CBlockLock lock(&m_cs);
     DWORD n;
-    return WriteAndRead4(&n, "GCCh") ? n : 0;
+    return WriteAndRead4(&n, "GCCh") ? n : 0xFFFFFFFF;
 }
 
 const BOOL CProxyClient3::OpenTuner()
@@ -230,7 +229,6 @@ void CProxyClient3::CloseTuner()
     CBlockLock lock(&m_cs);
     DWORD n;
     WriteAndRead4(&n, "Clos");
-    m_tsBufSize = 0;
 }
 
 const BOOL CProxyClient3::SetChannel(const BYTE bCh)
@@ -259,7 +257,7 @@ const DWORD CProxyClient3::GetReadyCount()
 {
     CBlockLock lock(&m_cs);
     DWORD n;
-    return (WriteAndRead4(&n, "GRea") ? n : 0) + (m_tsBufSize != 0 ? 1 : 0);
+    return WriteAndRead4(&n, "GRea") ? n : 0;
 }
 
 const BOOL CProxyClient3::GetTsStream(BYTE *pDst, DWORD *pdwSize, DWORD *pdwRemain)
@@ -275,36 +273,35 @@ const BOOL CProxyClient3::GetTsStream(BYTE **ppDst, DWORD *pdwSize, DWORD *pdwRe
 {
     CBlockLock lock(&m_cs);
     if (ppDst && pdwSize) {
-        if (m_tsBufSize == 0) {
-            ++m_sequenceNum;
-            for (int retry = 0;; ++retry) {
-                DWORD n;
-                if (Write("GTsS") && ReadAll(&n, 4)) {
-                    SwapBytes4(&n);
-                    if (n < 4 || n - 4 > sizeof(m_tsBuf)) {
-                        // 戻り値が異常
-                        closesocket(m_sock);
-                        m_sock = INVALID_SOCKET;
-                        break;
-                    }
-                    if (ReadAll(&m_tsRemain, 4) && ReadAll(m_tsBuf, n - 4)) {
-                        SwapBytes4(&m_tsRemain);
-                        m_tsBufSize = n - 4;
-                        break;
-                    }
-                }
-                if (retry >= 1) {
+        DWORD tsBufSize = 0;
+        DWORD tsRemain = 0;
+        ++m_sequenceNum;
+        for (int retry = 0;; ++retry) {
+            DWORD n;
+            if (Write("GTsS") && ReadAll(&n, 4)) {
+                SwapBytes4(&n);
+                if (n < 4 || n - 4 > sizeof(m_tsBuf)) {
+                    // 戻り値が異常
+                    closesocket(m_sock);
+                    m_sock = INVALID_SOCKET;
                     break;
                 }
-                Connect("BD\0\0Conn");
+                if (ReadAll(&tsRemain, 4) && ReadAll(m_tsBuf, n - 4)) {
+                    SwapBytes4(&tsRemain);
+                    tsBufSize = n - 4;
+                    break;
+                }
             }
+            if (retry >= 1) {
+                break;
+            }
+            Connect("BD\0\0Conn");
         }
         *ppDst = m_tsBuf;
-        *pdwSize = m_tsBufSize;
+        *pdwSize = tsBufSize;
         if (pdwRemain) {
-            *pdwRemain = m_tsBufSize == 0 ? 0 : m_tsRemain;
+            *pdwRemain = tsBufSize == 0 ? 0 : tsRemain;
         }
-        m_tsBufSize = 0;
         return TRUE;
     }
     return FALSE;
@@ -315,7 +312,6 @@ void CProxyClient3::PurgeTsStream()
     CBlockLock lock(&m_cs);
     DWORD n;
     WriteAndRead4(&n, "Purg");
-    m_tsBufSize = 0;
 }
 
 void CProxyClient3::Release()
