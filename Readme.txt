@@ -48,7 +48,7 @@ SESSION_TIMEOUT=180   # 不正な切断時に再接続を待つ時間(秒)
 用できるはずです。設定ファイルはWindowsと同様です。
 
 ■ライセンス
-MITとします。
+MITとします。IBonDriver*.hの追記部分はパブリックドメインとします。
 
 ■ソース
 https://github.com/xtne6f/BonDriverTunnel

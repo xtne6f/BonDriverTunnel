@@ -1,5 +1,6 @@
 ﻿#define _CRT_STDIO_ISO_WIDE_SPECIFIERS
 #define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
 #include <windows.h>
 #include <objbase.h>
 #include <shellapi.h>
@@ -10,6 +11,7 @@
 #include <process.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <algorithm>
 #include <memory>
 #include "IBonDriver3.h"
 #include "resource.h"
@@ -116,6 +118,9 @@ UINT WINAPI WorkerThread(void *p)
     IBonDriver *bon = nullptr;
     IBonDriver2 *bon2 = nullptr;
     IBonDriver3 *bon3 = nullptr;
+    CBonStructAdapter bonAdapter;
+    CBonStruct2Adapter bon2Adapter;
+    CBonStruct3Adapter bon3Adapter;
     std::unique_ptr<BDP_RING_BUFFER[]> ringBuf;
     DWORD ringBufRear = 0;
     DWORD ringBufFront = 0;
@@ -137,7 +142,7 @@ UINT WINAPI WorkerThread(void *p)
             DWORD remain;
             while (bon->GetTsStream(&buf, &bufSize, &remain) && buf && bufSize != 0) {
                 while (bufSize != 0) {
-                    ringBuf[ringBufRear].bufCount = min(bufSize, sizeof(ringBuf[0].buf));
+                    ringBuf[ringBufRear].bufCount = std::min<DWORD>(bufSize, sizeof(ringBuf[0].buf));
                     memcpy(ringBuf[ringBufRear].buf, buf, ringBuf[ringBufRear].bufCount);
                     buf += ringBuf[ringBufRear].bufCount;
                     bufSize -= ringBuf[ringBufRear].bufCount;
@@ -257,16 +262,37 @@ UINT WINAPI WorkerThread(void *p)
                         wcscat_s(libPath, L".dll");
                         hLib = LoadLibrary(libPath);
                         if (hLib) {
-                            IBonDriver *(*funcCreateBonDriver)() = reinterpret_cast<IBonDriver*(*)()>(GetProcAddress(hLib, "CreateBonDriver"));
-                            if (funcCreateBonDriver) {
-                                bon = funcCreateBonDriver();
-                                if (bon) {
-                                    bon2 = dynamic_cast<IBonDriver2*>(bon);
-                                    if (bon2) {
-                                        bon3 = dynamic_cast<IBonDriver3*>(bon2);
+                            const STRUCT_IBONDRIVER *(*funcCreateBonStruct)() = reinterpret_cast<const STRUCT_IBONDRIVER*(*)()>(GetProcAddress(hLib, "CreateBonStruct"));
+                            if (funcCreateBonStruct) {
+                                // 特定コンパイラに依存しないI/Fを使う
+                                const STRUCT_IBONDRIVER *st = funcCreateBonStruct();
+                                if (st) {
+                                    if (bon3Adapter.Adapt(*st)) {
+                                        bon = bon2 = bon3 = &bon3Adapter;
+                                    }
+                                    else if (bon2Adapter.Adapt(*st)) {
+                                        bon = bon2 = &bon2Adapter;
+                                    }
+                                    else {
+                                        bonAdapter.Adapt(*st);
+                                        bon = &bonAdapter;
                                     }
                                 }
                             }
+#ifdef _MSC_VER
+                            else {
+                                IBonDriver *(*funcCreateBonDriver)() = reinterpret_cast<IBonDriver*(*)()>(GetProcAddress(hLib, "CreateBonDriver"));
+                                if (funcCreateBonDriver) {
+                                    bon = funcCreateBonDriver();
+                                    if (bon) {
+                                        bon2 = dynamic_cast<IBonDriver2*>(bon);
+                                        if (bon2) {
+                                            bon3 = dynamic_cast<IBonDriver3*>(bon2);
+                                        }
+                                    }
+                                }
+                            }
+#endif
                         }
                     }
                     DWORD n = ctx->sessionID | (bon3 ? 3 : bon2 ? 2 : bon ? 1 : 0);
@@ -316,7 +342,7 @@ UINT WINAPI WorkerThread(void *p)
                     if (bon2) {
                         LPCWSTR tunerName = bon2->GetTunerName();
                         DWORD n = static_cast<DWORD>(tunerName ? wcslen(tunerName) + 1 : 0);
-                        n = min(n, 255);
+                        n = std::min<DWORD>(n, 255);
                         wbufSize = Write(ctx->wbuf, &n, tunerName, n * sizeof(WCHAR));
                     }
                 }
@@ -330,7 +356,7 @@ UINT WINAPI WorkerThread(void *p)
                     if (bon2) {
                         LPCWSTR tuningSpace = bon2->EnumTuningSpace(param1.n);
                         DWORD n = static_cast<DWORD>(tuningSpace ? wcslen(tuningSpace) + 1 : 0);
-                        n = min(n, 255);
+                        n = std::min<DWORD>(n, 255);
                         wbufSize = Write(ctx->wbuf, &n, tuningSpace, n * sizeof(WCHAR));
                     }
                 }
@@ -338,7 +364,7 @@ UINT WINAPI WorkerThread(void *p)
                     if (bon2) {
                         LPCWSTR channelName = bon2->EnumChannelName(param1.n, param2.n);
                         DWORD n = static_cast<DWORD>(channelName ? wcslen(channelName) + 1 : 0);
-                        n = min(n, 255);
+                        n = std::min<DWORD>(n, 255);
                         wbufSize = Write(ctx->wbuf, &n, channelName, n * sizeof(WCHAR));
                     }
                 }
@@ -662,9 +688,9 @@ UINT WINAPI ListenThread(void *p)
             }
             setExecutionState = GetPrivateProfileInt(L"OPTION", L"SET_EXECUTION_STATE", 1, iniPath) != 0;
             ringBufNum = GetPrivateProfileInt(L"OPTION", L"RING_BUF_NUM", 200, iniPath);
-            ringBufNum = min(max(ringBufNum, 50), 5000);
+            ringBufNum = std::min(std::max(ringBufNum, 50), 5000);
             sessionTimeout = GetPrivateProfileInt(L"OPTION", L"SESSION_TIMEOUT", 180, iniPath);
-            sessionTimeout = min(max(sessionTimeout, 5), 3600);
+            sessionTimeout = std::min(std::max(sessionTimeout, 5), 3600);
         }
     }
 
@@ -910,7 +936,12 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 }
 }
 
+#ifdef __MINGW32__
+__declspec(dllexport) // ASLRを無効にしないため(CVE-2018-5392)
+int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
+#else
 int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCmdShow)
+#endif
 {
     static_cast<void>(hInstance);
     static_cast<void>(hPrevInstance);
